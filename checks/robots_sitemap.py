@@ -7,6 +7,13 @@ from xml.etree import ElementTree as ET
 
 urllib3.disable_warnings()
 
+# Лимиты для защиты от зависаний
+MAX_SITEMAP_DEPTH = 3          # Максимальная глубина рекурсии
+MAX_URLS_PER_SITEMAP = 500     # Максимум URL в одном sitemap
+MAX_TOTAL_URLS = 1000          # Максимум URL всего
+MAX_RESPONSE_SIZE = 1_000_000  # 1 MB
+REQUEST_TIMEOUT = 5            # секунды
+
 # Паттерны, указывающие на интересные/скрытые пути
 INTERESTING_PATTERNS = [
     r"admin", r"administrator", r"login", r"wp-admin", r"cpanel",
@@ -26,7 +33,9 @@ def _parse_robots(url: str) -> tuple:
     try:
         robots_url = urljoin(url, "/robots.txt")
         response = requests.get(
-            robots_url, timeout=10, verify=False,
+            robots_url,
+            timeout=REQUEST_TIMEOUT,
+            verify=False,
             headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
         )
 
@@ -50,44 +59,117 @@ def _parse_robots(url: str) -> tuple:
     return disallow_paths, sitemap_urls
 
 
-def _parse_sitemap(sitemap_url: str) -> list:
-    """Парсит sitemap.xml, возвращает список URL."""
+def _parse_sitemap(sitemap_url: str, visited: set = None, depth: int = 0,
+                   total_counter: list = None) -> list:
+    """
+    Парсит sitemap.xml с защитой от рекурсии и циклов.
+    
+    Args:
+        sitemap_url: URL sitemap
+        visited: множество уже посещённых URL (защита от циклов)
+        depth: текущая глубина рекурсии
+        total_counter: счётчик общего количества URL (list для мутабельности)
+    """
+    # Инициализация при первом вызове
+    if visited is None:
+        visited = set()
+    if total_counter is None:
+        total_counter = [0]
+
+    # Защита от рекурсии
+    if depth > MAX_SITEMAP_DEPTH:
+        return []
+
+    # Защита от циклов
+    if sitemap_url in visited:
+        return []
+    visited.add(sitemap_url)
+
+    # Защита от превышения лимита
+    if total_counter[0] >= MAX_TOTAL_URLS:
+        return []
+
     urls = []
+
     try:
         response = requests.get(
-            sitemap_url, timeout=15, verify=False,
+            sitemap_url,
+            timeout=REQUEST_TIMEOUT,
+            verify=False,
+            stream=True,  # Для контроля размера
             headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
         )
+
         if response.status_code != 200:
             return urls
 
+        # Читаем с ограничением размера
+        content = b""
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if len(content) > MAX_RESPONSE_SIZE:
+                break
+        else:
+            # Если цикл завершился нормально (не было break)
+            pass
+
+        content_text = content.decode("utf-8", errors="ignore")
+
         # Обрабатываем sitemap index (ссылки на другие sitemap)
-        if "<sitemapindex" in response.text:
+        if "<sitemapindex" in content_text:
             try:
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(content)
                 ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-                for loc in root.findall(".//ns:sitemap/ns:loc", ns) or root.findall(".//loc"):
-                    child_sitemap = loc.text.strip()
-                    urls.extend(_parse_sitemap(child_sitemap))
+                
+                # Ищем ссылки на дочерние sitemap
+                child_sitemaps = []
+                for loc in root.findall(".//ns:sitemap/ns:loc", ns):
+                    if loc.text:
+                        child_sitemaps.append(loc.text.strip())
+                
+                # Если namespace не сработал
+                if not child_sitemaps:
+                    for loc in root.findall(".//loc"):
+                        if loc.text:
+                            child_sitemaps.append(loc.text.strip())
+
+                # Рекурсивно парсим дочерние sitemap
+                for child_url in child_sitemaps[:10]:  # Максимум 10 дочерних sitemap
+                    if total_counter[0] >= MAX_TOTAL_URLS:
+                        break
+                    child_urls = _parse_sitemap(
+                        child_url, visited, depth + 1, total_counter
+                    )
+                    urls.extend(child_urls)
+
             except ET.ParseError:
                 pass
             return urls
 
-        # Обычный sitemap
+        # Обычный sitemap с URL
         try:
-            root = ET.fromstring(response.content)
-            for loc in root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
+            root = ET.fromstring(content)
+            
+            # Пробуем с namespace
+            locs = root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+            if not locs:
+                locs = root.findall(".//loc")
+
+            for loc in locs:
+                if total_counter[0] >= MAX_TOTAL_URLS:
+                    break
+                if len(urls) >= MAX_URLS_PER_SITEMAP:
+                    break
                 if loc.text:
                     urls.append(loc.text.strip())
-            # Если namespace не сработал — пробуем без него
-            if not urls:
-                for loc in root.findall(".//loc"):
-                    if loc.text:
-                        urls.append(loc.text.strip())
+                    total_counter[0] += 1
+
         except ET.ParseError:
             pass
 
     except requests.RequestException:
+        pass
+    except Exception:
         pass
 
     return urls
@@ -130,24 +212,34 @@ def check_robots_sitemap(url: str) -> dict:
     sitemap_urls.append(urljoin(url, "/sitemap.xml"))
     sitemap_urls = list(set(sitemap_urls))  # Убираем дубли
 
+    # Парсим все sitemap с общей защитой от рекурсии
+    visited = set()
+    total_counter = [0]
     all_urls = []
-    for sitemap_url in sitemap_urls:
-        all_urls.extend(_parse_sitemap(sitemap_url))
 
-    all_urls = list(set(all_urls))
+    for sitemap_url in sitemap_urls:
+        if total_counter[0] >= MAX_TOTAL_URLS:
+            break
+        urls = _parse_sitemap(sitemap_url, visited, depth=0, total_counter=total_counter)
+        all_urls.extend(urls)
+
+    all_urls = list(set(all_urls))  # Убираем дубли
 
     if all_urls:
         results["findings"].append({
-            "info": f"Найдено {len(all_urls)} URL в sitemap",
+            "info": f"Найдено {len(all_urls)} URL в sitemap (обработано sitemap: {len(visited)})",
             "severity": "INFO"
         })
 
         # Ищем интересные URL в sitemap
         interesting_urls = []
         for u in all_urls:
-            parsed = urlparse(u)
-            if _is_interesting(parsed.path):
-                interesting_urls.append(u)
+            try:
+                parsed = urlparse(u)
+                if _is_interesting(parsed.path):
+                    interesting_urls.append(u)
+            except Exception:
+                continue
 
         for u in interesting_urls[:20]:
             results["status"] = "FAIL"
@@ -164,3 +256,5 @@ def check_robots_sitemap(url: str) -> dict:
             "info": "robots.txt и sitemap.xml не найдены или пусты",
             "severity": "INFO"
         })
+
+    return results
