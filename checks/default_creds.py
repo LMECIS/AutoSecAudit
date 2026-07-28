@@ -169,7 +169,7 @@ def check_default_credentials(url: str) -> dict:
    
     existing_paths = []
     for path in LOGIN_PATHS:
-        try
+        try:
             response = requests.get(
                 urljoin(url, path),
                 timeout=5,
