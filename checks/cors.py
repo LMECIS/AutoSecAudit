@@ -1,4 +1,3 @@
-# checks/cors.py
 import requests
 import urllib3
 
@@ -8,7 +7,6 @@ def check_cors(url: str) -> dict:
     """Проверяет конфигурацию CORS на уязвимости."""
     results = {"status": "PASS", "findings": []}
 
-    # Тестовые Origin-заголовки для проверки
     test_origins = [
         ("https://evil.com", "Произвольный домен"),
         ("https://example.evil.com", "Поддомен злоумышленника"),
@@ -32,7 +30,6 @@ def check_cors(url: str) -> dict:
             acao = response.headers.get("Access-Control-Allow-Origin", "")
             acac = response.headers.get("Access-Control-Allow-Credentials", "")
 
-            # Уязвимость 1: wildcard с credentials
             if acao == "*" and acac.lower() == "true":
                 results["status"] = "FAIL"
                 results["findings"].append({
@@ -43,7 +40,6 @@ def check_cors(url: str) -> dict:
                     "solution": "Убрать credentials или явно указать разрешённые домены"
                 })
 
-            # Уязвимость 2: сервер отражает Origin атакующего
             if acao == origin and origin != "null":
                 results["status"] = "FAIL"
                 results["findings"].append({
@@ -54,7 +50,6 @@ def check_cors(url: str) -> dict:
                     "solution": "Использовать whitelist разрешённых доменов"
                 })
 
-            # Уязвимость 3: null origin с credentials
             if acao == "null" and acac.lower() == "true":
                 results["status"] = "FAIL"
                 results["findings"].append({
@@ -65,7 +60,6 @@ def check_cors(url: str) -> dict:
                     "solution": "Запретить null origin или убрать credentials"
                 })
 
-        # Проверка preflight (OPTIONS)
         try:
             options_resp = requests.options(
                 url,

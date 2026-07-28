@@ -1,4 +1,3 @@
-# checks/cookies.py
 import requests
 import urllib3
 
@@ -22,16 +21,12 @@ def check_cookies(url: str) -> dict:
         for cookie in cookies:
             issues = []
             
-            # Проверка флага Secure
             if not cookie.secure and url.startswith('https://'):
                 issues.append("отсутствует флаг Secure")
             
-            # Проверка флага HttpOnly
             if not cookie.has_nonstandard_attr('HttpOnly') and not cookie.has_nonstandard_attr('httponly'):
-                # requests не всегда корректно парсит HttpOnly, проверяем через raw headers
                 pass
             
-            # Проверка SameSite
             samesite = cookie.has_nonstandard_attr('SameSite') or cookie.has_nonstandard_attr('samesite')
             if not samesite:
                 issues.append("отсутствует SameSite (риск CSRF)")

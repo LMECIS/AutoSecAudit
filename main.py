@@ -1,6 +1,8 @@
-# main.py (исправленная версия)
+# main.py
 import argparse
 import json
+import webbrowser
+import os
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -20,7 +22,8 @@ from checks.default_creds import check_default_credentials
 from reports.html_report import generate_html_report
 
 
-def run_audit(target_url: str, enable_subdomains: bool = False, enable_brute: bool = False):
+def run_audit(target_url: str, enable_subdomains: bool = False, 
+              enable_brute: bool = False, auto_open: bool = True):
     print(f"\n{'='*60}")
     print(f"[*] AutoSecAudit v3.0")
     print(f"[*] Цель: {target_url}")
@@ -138,7 +141,19 @@ def run_audit(target_url: str, enable_subdomains: bool = False, enable_brute: bo
     html_filename = f"audit_report_{domain}_{timestamp}.html"
     generate_html_report(report, html_filename)
     print(f"[+] HTML отчёт: {html_filename}")
-    print(f"[+] Откройте HTML в браузере 🌐\n")
+    
+    # --- Автооткрытие HTML в браузере ---
+    if auto_open:
+        try:
+            # Получаем абсолютный путь (webbrowser требует полный путь)
+            html_path = os.path.abspath(html_filename)
+            print(f"[🌐] Открываю отчёт в браузере...")
+            webbrowser.open(f"file://{html_path}")
+        except Exception as e:
+            print(f"[!] Не удалось открыть браузер: {e}")
+            print(f"[!] Откройте файл вручную: {html_filename}")
+    
+    print()
 
 
 if __name__ == "__main__":
@@ -149,6 +164,10 @@ if __name__ == "__main__":
 ПРИМЕРЫ:
   python main.py https://example.com
       Базовый пассивный аудит (~1 минута)
+      HTML отчёт откроется автоматически в браузере
+
+  python main.py https://example.com --no-open
+      Аудит без автооткрытия браузера
 
   python main.py https://example.com --subdomains
       + поиск поддоменов через DNS (~2-3 минуты)
@@ -172,6 +191,11 @@ if __name__ == "__main__":
         action="store_true",
         help="⚠️  Включить проверку дефолтных учёток (ТОЛЬКО для своих ресурсов!)"
     )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Не открывать HTML отчёт в браузере автоматически"
+    )
     args = parser.parse_args()
 
     if not args.url.startswith('http'):
@@ -190,4 +214,12 @@ if __name__ == "__main__":
         print("явного письменного разрешения владельца.")
         print("="*60 + "\n")
 
-    run_audit(args.url, enable_subdomains=args.subdomains, enable_brute=args.brute)
+    # Автооткрытие включено по умолчанию, отключается через --no-open
+    auto_open = not args.no_open
+
+    run_audit(
+        args.url, 
+        enable_subdomains=args.subdomains, 
+        enable_brute=args.brute,
+        auto_open=auto_open
+    )

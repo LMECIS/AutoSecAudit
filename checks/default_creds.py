@@ -1,4 +1,3 @@
-# checks/default_creds.py
 """
 ⚠️ ВНИМАНИЕ: Этот модуль выполняет активные действия — попытки входа
 с дефолтными учётными данными. Используйте ТОЛЬКО на своих ресурсах
@@ -66,14 +65,12 @@ DEFAULT_CREDENTIALS = [
     ("", "admin"),
 ]
 
-# Сигнатуры успешного входа
 SUCCESS_INDICATORS = [
     "dashboard", "welcome", "logout", "log out", "sign out",
     "my account", "мой аккаунт", "выход", "панель управления",
     "admin panel", "админ", "профиль", "profile",
 ]
 
-# Сигнатуры неудачного входа
 FAILURE_INDICATORS = [
     "invalid", "incorrect", "неверн", "ошибк", "wrong",
     "failed", "denied", "запрещ", "неправил",
@@ -91,14 +88,11 @@ def _check_login(url: str, path: str, username: str, password: str) -> dict:
         "details": ""
     }
 
-    # Пробуем разные форматы данных
     payloads = [
-        # Форма
         {"data": {"username": username, "password": password, "login": "Login"}},
         {"data": {"user": username, "pass": password, "submit": "Войти"}},
         {"data": {"email": username, "password": password}},
-        {"data": {"log": username, "pwd": password}},  # WordPress
-        # JSON
+        {"data": {"log": username, "pwd": password}}, 
         {"json": {"username": username, "password": password}},
         {"json": {"user": username, "password": password}},
     ]
@@ -133,17 +127,14 @@ def _check_login(url: str, path: str, username: str, password: str) -> dict:
 
                 content = response.text.lower()
 
-                # Проверяем признаки успеха
                 has_success = any(ind in content for ind in SUCCESS_INDICATORS)
                 has_failure = any(ind in content for ind in FAILURE_INDICATORS)
 
-                # Успех = есть признаки успеха И нет признаков неудачи
                 if has_success and not has_failure:
                     result["success"] = True
                     result["details"] = f"Обнаружены признаки успешного входа"
                     return result
 
-                # Также проверяем по редиректу и cookie
                 if (response.history and
                     any(r.status_code in [301, 302] for r in response.history) and
                     has_success):
@@ -172,13 +163,13 @@ def check_default_credentials(url: str) -> dict:
     }
 
     attempts = 0
-    max_attempts = 50  # Ограничение для безопасности
+    max_attempts = 50 
     found_credentials = []
 
-    # Сначала проверяем, какие пути вообще существуют (быстрая проверка)
+   
     existing_paths = []
     for path in LOGIN_PATHS:
-        try:
+        try
             response = requests.get(
                 urljoin(url, path),
                 timeout=5,
@@ -186,7 +177,6 @@ def check_default_credentials(url: str) -> dict:
                 allow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
             )
-            # Если страница не 404 — она существует
             if response.status_code != 404:
                 existing_paths.append(path)
         except requests.RequestException:
@@ -204,7 +194,6 @@ def check_default_credentials(url: str) -> dict:
         "severity": "INFO"
     })
 
-    # Теперь пробуем учётки только на существующих путях
     for path in existing_paths:
         for username, password in DEFAULT_CREDENTIALS:
             if attempts >= max_attempts:
