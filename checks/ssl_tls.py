@@ -32,11 +32,7 @@ def check_ssl(url: str) -> dict:
                 "issue": f"Используется устаревший протокол: {version}",
                 "severity": "HIGH"
             })
-            
-        # Проверка срока действия (если сертификат самоподписанный или мы не смогли его распарсить через default_context)
-        # Для полноценного парсинга dates лучше использовать библиотеку cryptography, 
-        # но здесь мы используем базовый socket для демонстрации концепции.
-        # В реальном проекте используйте: from cryptography import x509
+
         
     except ssl.SSLError as e:
         results["status"] = "FAIL"
