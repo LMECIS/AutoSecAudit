@@ -21,12 +21,12 @@ SUBDOMAIN_WORDLIST = [
     "jira", "confluence", "gitlab", "github", "slack", "video", "stream",
     "archive", "old", "new", "beta", "alpha", "demo", "sandbox", "uat",
     "prod", "stage", "qa", "preprod", "edge", "origin", "assets", "files",
-    "data", "analytics", "logs", "debug", "health", "info"
+    "data", "analytics", "logs", "debug", "health", "info", "calls", "netbird", "etp"
 ]
 
 SENSITIVE_KEYWORDS = ["admin", "dev", "staging", "test", "internal",
                       "jenkins", "git", "dashboard", "panel", "db",
-                      "mysql", "postgres", "redis", "mongo"]
+                      "mysql", "postgres", "redis", "mongo", "calls", "netbird", "etp"]
 
 
 # Настраиваем DNS-резолвер с нормальными таймаутами
