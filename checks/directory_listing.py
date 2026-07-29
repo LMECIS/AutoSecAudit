@@ -1,83 +1,69 @@
 # checks/directory_listing.py
-import requests
-import urllib3
+import httpx
 from urllib.parse import urljoin
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-# Популярные пути, где часто встречаются открытые директории
 COMMON_DIRECTORIES = [
-    {"path": "backup/", "description": "Резервные копии", "severity": "HIGH"},
-    {"path": "backups/", "description": "Резервные копии", "severity": "HIGH"},
-    {"path": "uploads/", "description": "Загруженные файлы", "severity": "MEDIUM"},
-    {"path": "images/", "description": "Изображения", "severity": "LOW"},
-    {"path": "assets/", "description": "Статические ресурсы", "severity": "LOW"},
-    {"path": "static/", "description": "Статические файлы", "severity": "LOW"},
-    {"path": "media/", "description": "Медиа-файлы", "severity": "LOW"},
-    {"path": "files/", "description": "Файлы", "severity": "MEDIUM"},
-    {"path": "downloads/", "description": "Загрузки", "severity": "MEDIUM"},
-    {"path": "logs/", "description": "Логи (утечка информации)", "severity": "HIGH"},
-    {"path": "log/", "description": "Логи", "severity": "HIGH"},
-    {"path": "temp/", "description": "Временные файлы", "severity": "MEDIUM"},
-    {"path": "tmp/", "description": "Временные файлы", "severity": "MEDIUM"},
-    {"path": "cache/", "description": "Кэш", "severity": "MEDIUM"},
-    {"path": "admin/", "description": "Админ-панель", "severity": "HIGH"},
-    {"path": "administrator/", "description": "Админ-панель", "severity": "HIGH"},
-    {"path": "wp-admin/", "description": "WordPress админка", "severity": "MEDIUM"},
-    {"path": "wp-content/uploads/", "description": "WordPress загрузки", "severity": "MEDIUM"},
-    {"path": "api/", "description": "API endpoints", "severity": "MEDIUM"},
-    {"path": "docs/", "description": "Документация", "severity": "LOW"},
-    {"path": "swagger/", "description": "Swagger UI", "severity": "MEDIUM"},
-    {"path": "api-docs/", "description": "API документация", "severity": "MEDIUM"},
-    {"path": ".aws/", "description": "AWS конфиги", "severity": "CRITICAL"},
-    {"path": "config/", "description": "Конфигурации", "severity": "HIGH"},
-    {"path": "conf/", "description": "Конфигурации", "severity": "HIGH"},
-    {"path": "db/", "description": "Базы данных", "severity": "CRITICAL"},
-    {"path": "database/", "description": "Базы данных", "severity": "CRITICAL"},
+    {"path": "backup/", "description": "Резервные копии", "severity": Severity.HIGH},
+    {"path": "backups/", "description": "Резервные копии", "severity": Severity.HIGH},
+    {"path": "uploads/", "description": "Загруженные файлы", "severity": Severity.MEDIUM},
+    {"path": "logs/", "description": "Логи", "severity": Severity.HIGH},
+    {"path": "log/", "description": "Логи", "severity": Severity.HIGH},
+    {"path": "temp/", "description": "Временные файлы", "severity": Severity.MEDIUM},
+    {"path": "tmp/", "description": "Временные файлы", "severity": Severity.MEDIUM},
+    {"path": "admin/", "description": "Админ-панель", "severity": Severity.HIGH},
+    {"path": "administrator/", "description": "Админ-панель", "severity": Severity.HIGH},
+    {"path": "wp-admin/", "description": "WordPress админка", "severity": Severity.MEDIUM},
+    {"path": "api/", "description": "API endpoints", "severity": Severity.MEDIUM},
+    {"path": "swagger/", "description": "Swagger UI", "severity": Severity.MEDIUM},
+    {"path": ".aws/", "description": "AWS конфиги", "severity": Severity.CRITICAL},
+    {"path": "config/", "description": "Конфигурации", "severity": Severity.HIGH},
+    {"path": "db/", "description": "Базы данных", "severity": Severity.CRITICAL},
 ]
 
-# Сигнатуры, указывающие на открытый индекс директории
 DIRECTORY_LISTING_SIGNATURES = [
-    "Index of /",
-    "Directory listing for",
-    "<title>Index of",
-    "Directory Listing",
-    "[To Parent Directory]",
-    "Parent Directory</a>",
-    "<h1>Index of",
+    "index of /", "directory listing for", "<title>index of",
+    "directory listing", "[to parent directory]", "parent directory</a>",
 ]
 
-def check_directory_listing(url: str) -> dict:
-    """Ищет открытые директории (Directory Listing)."""
-    results = {"status": "PASS", "findings": []}
 
-    for dir_info in COMMON_DIRECTORIES:
+async def check_directory_listing(client: httpx.AsyncClient, url: str) -> ModuleResult:
+    """Ищет открытые директории (Directory Listing)."""
+    findings = []
+
+    async def _check_one(dir_info: dict):
         try:
             full_url = urljoin(url, dir_info["path"])
-            response = requests.get(
-                full_url,
-                timeout=5,
-                verify=False,
-                allow_redirects=False,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
-            )
+            response = await client.get(full_url, follow_redirects=False)
 
-            # Проверяем, что это 200 OK и это HTML-страница с индексом
             if response.status_code == 200:
-                content_type = response.headers.get("Content-Type", "")
+                content_type = response.headers.get("content-type", "")
                 if "text/html" in content_type:
-                    content = response.text[:5000]
+                    content = response.text[:5000].lower()
                     for signature in DIRECTORY_LISTING_SIGNATURES:
-                        if signature.lower() in content.lower():
-                            results["status"] = "FAIL"
-                            results["findings"].append({
-                                "path": dir_info["path"],
-                                "url": full_url,
-                                "description": f"Открытая директория: {dir_info['description']}",
-                                "severity": dir_info["severity"]
-                            })
-                            break
-        except requests.RequestException:
-            continue
+                        if signature in content:
+                            return Finding(
+                                issue=f"Открытая директория: {dir_info['path']}",
+                                severity=dir_info["severity"],
+                                module="Открытые директории",
+                                description=dir_info["description"],
+                                url=full_url,
+                                path=dir_info["path"]
+                            )
+        except Exception:
+            pass
+        return None
 
-    return results
+    tasks = [_check_one(d) for d in COMMON_DIRECTORIES]
+    results = await asyncio.gather(*tasks)
+
+    for r in results:
+        if r is not None:
+            findings.append(r)
+
+    status = "FAIL" if findings else "PASS"
+    return ModuleResult(status=status, findings=findings)
+
+
+import asyncio

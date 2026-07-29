@@ -1,102 +1,58 @@
 # checks/exposed_files.py
-import requests
-import urllib3
+import httpx
 from urllib.parse import urljoin
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-# Список критических файлов, которые не должны быть доступны публично
 SENSITIVE_FILES = [
-    {
-        "path": ".git/config",
-        "description": "Конфигурация Git (может содержать учетные данные)",
-        "severity": "CRITICAL",
-        "marker": "[core]"  # Признак валидного git config
-    },
-    {
-        "path": ".env",
-        "description": "Переменные окружения (пароли, API ключи)",
-        "severity": "CRITICAL",
-        "marker": "="
-    },
-    {
-        "path": ".env.backup",
-        "description": "Резервная копия .env",
-        "severity": "CRITICAL",
-        "marker": "="
-    },
-    {
-        "path": "wp-config.php",
-        "description": "Конфигурация WordPress",
-        "severity": "CRITICAL",
-        "marker": "<?php"
-    },
-    {
-        "path": "config.php",
-        "description": "Конфигурационный файл",
-        "severity": "HIGH",
-        "marker": "<?php"
-    },
-    {
-        "path": "phpinfo.php",
-        "description": "Информация о PHP конфигурации",
-        "severity": "HIGH",
-        "marker": "phpinfo()"
-    },
-    {
-        "path": ".htaccess",
-        "description": "Конфигурация Apache",
-        "severity": "MEDIUM",
-        "marker": "RewriteEngine"
-    },
-    {
-        "path": "server-status",
-        "description": "Статус Apache (утечка информации)",
-        "severity": "MEDIUM",
-        "marker": "Apache Server Status"
-    },
-    {
-        "path": "sitemap.xml",
-        "description": "Карта сайта (раскрытие структуры)",
-        "severity": "INFO",
-        "marker": "<urlset"
-    },
-    {
-        "path": "robots.txt",
-        "description": "Правила для поисковиков",
-        "severity": "INFO",
-        "marker": "User-agent"
-    }
+    {"path": ".git/config", "description": "Конфигурация Git", "severity": Severity.CRITICAL, "marker": "[core]"},
+    {"path": ".env", "description": "Переменные окружения", "severity": Severity.CRITICAL, "marker": "="},
+    {"path": ".env.backup", "description": "Резервная копия .env", "severity": Severity.CRITICAL, "marker": "="},
+    {"path": "wp-config.php", "description": "Конфигурация WordPress", "severity": Severity.CRITICAL, "marker": "<?php"},
+    {"path": "config.php", "description": "Конфигурационный файл", "severity": Severity.HIGH, "marker": "<?php"},
+    {"path": "phpinfo.php", "description": "Информация о PHP", "severity": Severity.HIGH, "marker": "phpinfo()"},
+    {"path": ".htaccess", "description": "Конфигурация Apache", "severity": Severity.MEDIUM, "marker": "RewriteEngine"},
+    {"path": "server-status", "description": "Статус Apache", "severity": Severity.MEDIUM, "marker": "Apache Server Status"},
+    {"path": "sitemap.xml", "description": "Карта сайта", "severity": Severity.INFO, "marker": "<urlset"},
+    {"path": "robots.txt", "description": "Правила для поисковиков", "severity": Severity.INFO, "marker": "User-agent"},
 ]
 
-def check_exposed_files(url: str) -> dict:
+
+async def check_exposed_files(client: httpx.AsyncClient, url: str) -> ModuleResult:
     """Ищет публично доступные чувствительные файлы."""
-    results = {"status": "PASS", "findings": []}
-    
-    for file_info in SENSITIVE_FILES:
+    findings = []
+
+    async def _check_one(file_info: dict):
         try:
             full_url = urljoin(url, file_info["path"])
-            response = requests.get(
-                full_url, 
-                timeout=5, 
-                verify=False, 
-                allow_redirects=False  # Не следовать редиректам
-            )
-            
-            # Проверяем, что файл реально существует (200 OK) и содержит маркер
+            response = await client.get(full_url, follow_redirects=False)
+
             if response.status_code == 200:
-                content = response.text[:1000]  # Читаем только начало
+                content = response.text[:1000]
                 if file_info["marker"] in content:
-                    results["status"] = "FAIL"
-                    results["findings"].append({
-                        "file": file_info["path"],
-                        "url": full_url,
-                        "description": file_info["description"],
-                        "severity": file_info["severity"],
-                        "size": len(response.content)
-                    })
-                    
-        except requests.RequestException:
-            continue  # Игнорируем ошибки сети
-            
-    return results
+                    return Finding(
+                        issue=f"Доступен файл: {file_info['path']}",
+                        severity=file_info["severity"],
+                        module="Утечки файлов",
+                        description=file_info["description"],
+                        url=full_url,
+                        file=file_info["path"]
+                    )
+        except Exception:
+            pass
+        return None
+
+    # Параллельная проверка всех файлов
+    tasks = [_check_one(f) for f in SENSITIVE_FILES]
+    results = await asyncio.gather(*tasks)
+
+    for r in results:
+        if r is not None:
+            findings.append(r)
+
+    status = "FAIL" if findings else "PASS"
+    return ModuleResult(status=status, findings=findings)
+
+
+# Импортируем asyncio для gather
+import asyncio

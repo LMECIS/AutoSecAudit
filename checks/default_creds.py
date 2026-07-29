@@ -1,228 +1,155 @@
+# checks/default_creds.py
 """
-⚠️ ВНИМАНИЕ: Этот модуль выполняет активные действия — попытки входа
-с дефолтными учётными данными. Используйте ТОЛЬКО на своих ресурсах
-или при наличии явного письменного разрешения.
-
-Модуль отключён по умолчанию. Для включения используйте флаг --brute.
+⚠️ ВНИМАНИЕ: Активный модуль — использовать ТОЛЬКО на своих ресурсах!
 """
-import requests
-import urllib3
+import httpx
 from urllib.parse import urljoin
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-# Популярные пути для проверки
 LOGIN_PATHS = [
-    "/admin",
-    "/administrator",
-    "/login",
-    "/wp-admin/",
-    "/wp-login.php",
-    "/cpanel",
-    "/manager/html",           # Tomcat
-    "/console",                # WebLogic
-    "/jenkins/login",
-    "/phpmyadmin",
-    "/adminer",
-    "/solr/admin",
-    "/_utils/",                # CouchDB
-    "/api/v1/login",
-    "/api/auth/login",
-    "/auth/login",
-    "/user/login",
-    "/portal/login",
-    "/signin",
-    "/controlpanel",
+    "/admin", "/administrator", "/login", "/wp-admin/", "/wp-login.php",
+    "/cpanel", "/manager/html", "/console", "/jenkins/login",
+    "/phpmyadmin", "/adminer", "/api/v1/login", "/api/auth/login",
+    "/auth/login", "/user/login", "/portal/login", "/signin"
 ]
 
-# Популярные пары логин/пароль (ТОЛЬКО для тестирования своих систем!)
 DEFAULT_CREDENTIALS = [
-    ("admin", "admin"),
-    ("admin", "password"),
-    ("admin", "123456"),
-    ("admin", "12345678"),
-    ("admin", "admin123"),
-    ("admin", "qwerty"),
-    ("admin", "letmein"),
-    ("admin", "welcome"),
-    ("admin", "monkey"),
-    ("admin", "master"),
-    ("admin", "dragon"),
-    ("admin", "login"),
-    ("admin", "princess"),
-    ("admin", "football"),
-    ("admin", "shadow"),
-    ("admin", "sunshine"),
-    ("admin", "trustno1"),
-    ("admin", "iloveyou"),
-    ("root", "root"),
-    ("root", "toor"),
-    ("test", "test"),
-    ("user", "user"),
-    ("guest", "guest"),
-    ("tomcat", "tomcat"),
-    ("admin", ""),
-    ("", "admin"),
+    ("admin", "admin"), ("admin", "password"), ("admin", "123456"),
+    ("admin", "12345678"), ("admin", "admin123"), ("admin", "qwerty"),
+    ("admin", "letmein"), ("admin", "welcome"), ("root", "root"),
+    ("test", "test"), ("user", "user"), ("guest", "guest"),
+    ("tomcat", "tomcat"), ("admin", ""), ("", "admin"),
 ]
 
 SUCCESS_INDICATORS = [
     "dashboard", "welcome", "logout", "log out", "sign out",
     "my account", "мой аккаунт", "выход", "панель управления",
-    "admin panel", "админ", "профиль", "profile",
+    "admin panel", "админ", "профиль", "profile"
 ]
 
 FAILURE_INDICATORS = [
     "invalid", "incorrect", "неверн", "ошибк", "wrong",
-    "failed", "denied", "запрещ", "неправил",
+    "failed", "denied", "запрещ", "неправил"
 ]
 
 
-def _check_login(url: str, path: str, username: str, password: str) -> dict:
+async def _check_login(client: httpx.AsyncClient, login_url: str,
+                       username: str, password: str) -> bool:
     """Пробует войти с указанными учётными данными."""
-    login_url = urljoin(url, path)
-    result = {
-        "path": path,
-        "username": username,
-        "password": password,
-        "success": False,
-        "details": ""
-    }
-
     payloads = [
         {"data": {"username": username, "password": password, "login": "Login"}},
         {"data": {"user": username, "pass": password, "submit": "Войти"}},
-        {"data": {"email": username, "password": password}},
-        {"data": {"log": username, "pwd": password}}, 
+        {"data": {"log": username, "pwd": password}},
         {"json": {"username": username, "password": password}},
-        {"json": {"user": username, "password": password}},
     ]
 
-    try:
-        for payload in payloads:
-            try:
-                if "data" in payload:
-                    response = requests.post(
-                        login_url,
-                        data=payload["data"],
-                        timeout=5,
-                        verify=False,
-                        allow_redirects=True,
-                        headers={
-                            "User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)",
-                            "Content-Type": "application/x-www-form-urlencoded"
-                        }
-                    )
-                else:
-                    response = requests.post(
-                        login_url,
-                        json=payload["json"],
-                        timeout=5,
-                        verify=False,
-                        allow_redirects=True,
-                        headers={
-                            "User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)",
-                            "Content-Type": "application/json"
-                        }
-                    )
-
-                content = response.text.lower()
-
-                has_success = any(ind in content for ind in SUCCESS_INDICATORS)
-                has_failure = any(ind in content for ind in FAILURE_INDICATORS)
-
-                if has_success and not has_failure:
-                    result["success"] = True
-                    result["details"] = f"Обнаружены признаки успешного входа"
-                    return result
-
-                if (response.history and
-                    any(r.status_code in [301, 302] for r in response.history) and
-                    has_success):
-                    result["success"] = True
-                    result["details"] = "Успешный редирект после входа"
-                    return result
-
-            except requests.RequestException:
-                continue
-
-    except Exception as e:
-        result["details"] = f"Ошибка: {e}"
-
-    return result
-
-
-def check_default_credentials(url: str) -> dict:
-    """
-    Проверяет дефолтные учётные данные на популярных путях.
-    ⚠️ ИСПОЛЬЗОВАТЬ ТОЛЬКО НА СВОИХ РЕСУРСАХ!
-    """
-    results = {
-        "status": "PASS",
-        "findings": [],
-        "warning": "⚠️ Активная проверка учётных данных — только для авторизованного тестирования"
-    }
-
-    attempts = 0
-    max_attempts = 50 
-    found_credentials = []
-
-   
-    existing_paths = []
-    for path in LOGIN_PATHS:
+    for payload in payloads:
         try:
-            response = requests.get(
-                urljoin(url, path),
-                timeout=5,
-                verify=False,
-                allow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
-            )
-            if response.status_code != 404:
-                existing_paths.append(path)
-        except requests.RequestException:
+            if "data" in payload:
+                response = await client.post(login_url, data=payload["data"],
+                                             follow_redirects=True)
+            else:
+                response = await client.post(login_url, json=payload["json"],
+                                             follow_redirects=True)
+
+            content = response.text.lower()
+            has_success = any(ind in content for ind in SUCCESS_INDICATORS)
+            has_failure = any(ind in content for ind in FAILURE_INDICATORS)
+
+            if has_success and not has_failure:
+                return True
+        except Exception:
             continue
 
-    if not existing_paths:
-        results["findings"].append({
-            "info": "Страницы входа не найдены",
-            "severity": "INFO"
-        })
-        return results
+    return False
 
-    results["findings"].append({
-        "info": f"Найдено {len(existing_paths)} потенциальных страниц входа",
-        "severity": "INFO"
-    })
 
-    for path in existing_paths:
-        for username, password in DEFAULT_CREDENTIALS:
-            if attempts >= max_attempts:
-                results["findings"].append({
-                    "warning": f"Достигнут лимит попыток ({max_attempts})",
-                    "severity": "INFO"
-                })
-                return results
+async def check_default_creds(client: httpx.AsyncClient, url: str) -> ModuleResult:
+    """
+    Проверяет дефолтные учётные данные.
+    ⚠️ ИСПОЛЬЗОВАТЬ ТОЛЬКО НА СВОИХ РЕСУРСАХ!
+    """
+    findings = []
+    findings.append(Finding(
+        info="⚠️ Активная проверка учётных данных",
+        issue="Модуль активной проверки",
+        severity=Severity.INFO,
+        module="Дефолтные учётки"
+    ))
 
-            attempts += 1
-            result = _check_login(url, path, username, password)
+    try:
+        # Сначала проверяем существующие пути
+        existing_paths = []
+        for path in LOGIN_PATHS:
+            try:
+                response = await client.get(urljoin(url, path), follow_redirects=True)
+                if response.status_code != 404:
+                    existing_paths.append(path)
+            except Exception:
+                continue
 
-            if result["success"]:
-                results["status"] = "FAIL"
-                creds_str = f"{username or '(пусто)'}:{password or '(пусто)'}"
-                results["findings"].append({
-                    "path": path,
-                    "credentials": creds_str,
-                    "issue": f"🚨 ОБНАРУЖЕНЫ ДЕФОЛТНЫЕ УЧЁТНЫЕ ДАННЫЕ!",
-                    "description": f"Путь: {path}, Учётка: {creds_str}",
-                    "severity": "CRITICAL",
-                    "solution": "Немедленно смените пароль и отключите дефолтные учётки"
-                })
-                found_credentials.append((path, creds_str))
+        if not existing_paths:
+            findings.append(Finding(
+                info="Страницы входа не найдены",
+                issue="Страницы входа не обнаружены",
+                severity=Severity.INFO,
+                module="Дефолтные учётки"
+            ))
+            return ModuleResult(status="PASS", findings=findings)
 
-    if not found_credentials:
-        results["findings"].append({
-            "info": f"Дефолтные учётные данные не подошли (проверено {attempts} попыток)",
-            "severity": "INFO"
-        })
+        findings.append(Finding(
+            info=f"Найдено {len(existing_paths)} страниц входа",
+            issue=f"Обнаружено {len(existing_paths)} потенциальных форм входа",
+            severity=Severity.INFO,
+            module="Дефолтные учётки"
+        ))
 
-    return results
+        # Пробуем учётки
+        attempts = 0
+        max_attempts = 50
+
+        for path in existing_paths:
+            for username, password in DEFAULT_CREDENTIALS:
+                if attempts >= max_attempts:
+                    findings.append(Finding(
+                        warning=f"Достигнут лимит попыток ({max_attempts})",
+                        issue=f"Лимит попыток исчерпан",
+                        severity=Severity.INFO,
+                        module="Дефолтные учётки"
+                    ))
+                    return ModuleResult(status="PASS", findings=findings)
+
+                attempts += 1
+                login_url = urljoin(url, path)
+
+                if await _check_login(client, login_url, username, password):
+                    creds_str = f"{username or '(пусто)'}:{password or '(пусто)'}"
+                    findings.append(Finding(
+                        issue="🚨 ОБНАРУЖЕНЫ ДЕФОЛТНЫЕ УЧЁТНЫЕ ДАННЫЕ!",
+                        severity=Severity.CRITICAL,
+                        module="Дефолтные учётки",
+                        path=path,
+                        credentials=creds_str,
+                        description=f"Путь: {path}, Учётка: {creds_str}",
+                        solution="Немедленно смените пароль"
+                    ))
+
+        if not any(f.severity == Severity.CRITICAL for f in findings):
+            findings.append(Finding(
+                info=f"Дефолтные учётки не подошли (проверено {attempts})",
+                issue="Дефолтные учётки не обнаружены",
+                severity=Severity.INFO,
+                module="Дефолтные учётки"
+            ))
+
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка проверки учётных данных",
+            severity=Severity.INFO,
+            module="Дефолтные учётки",
+            error=str(e)
+        ))
+
+    status = "FAIL" if any(f.severity == Severity.CRITICAL for f in findings) else "PASS"
+    return ModuleResult(status=status, findings=findings)

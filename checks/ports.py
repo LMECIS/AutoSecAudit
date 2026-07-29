@@ -1,68 +1,67 @@
 # checks/ports.py
+import asyncio
 import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import httpx
+from urllib.parse import urlparse
+from models import Finding, ModuleResult, Severity
 
-# Самые важные порты для веб-безопасности
+
 COMMON_PORTS = {
-    21: "FTP",
-    22: "SSH",
-    23: "Telnet (НЕБЕЗОПАСНО)",
-    25: "SMTP",
-    53: "DNS",
-    80: "HTTP",
-    110: "POP3",
-    143: "IMAP",
-    443: "HTTPS",
-    445: "SMB (часто уязвим)",
-    3306: "MySQL",
-    3389: "RDP",
-    5432: "PostgreSQL",
-    6379: "Redis (часто без пароля)",
-    8080: "HTTP Proxy",
-    8443: "HTTPS Alt",
-    9200: "Elasticsearch",
-    27017: "MongoDB"
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+    80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS",
+    445: "SMB", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
+    6379: "Redis", 8080: "HTTP Proxy", 8443: "HTTPS Alt",
+    9200: "Elasticsearch", 27017: "MongoDB"
 }
 
-def scan_port(hostname: str, port: int, timeout: int = 1) -> dict:
-    """Сканирует один порт."""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((hostname, port))
-        sock.close()
-        
-        if result == 0:
-            return {
-                "port": port,
-                "service": COMMON_PORTS.get(port, "Unknown"),
-                "status": "OPEN"
-            }
-    except Exception:
-        pass
-    return None
+DANGEROUS_PORTS = {23, 445, 6379, 27017, 9200}
 
-def check_ports(url: str, top_ports: int = 100) -> dict:
+
+async def _scan_port_async(hostname: str, port: int, timeout: float = 2.0) -> bool:
+    """Асинхронная проверка одного порта."""
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(hostname, port),
+            timeout=timeout
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
+async def check_ports(client: httpx.AsyncClient, url: str) -> ModuleResult:
     """Сканирует топ портов на хосте."""
-    from urllib.parse import urlparse
-    
-    results = {"status": "PASS", "findings": []}
-    hostname = urlparse(url).hostname or url
-    
-    # Используем ThreadPoolExecutor для параллельного сканирования
-    with ThreadPoolExecutor(max_workers=50) as executor:
-        futures = {
-            executor.submit(scan_port, hostname, port): port 
-            for port in COMMON_PORTS.keys()
-        }
-        
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                results["findings"].append(result)
-                
-                # Повышаем severity для опасных сервисов
-                if result["port"] in [23, 445, 6379, 27017, 9200]:
-                    results["status"] = "FAIL"
-                    
-    return results
+    findings = []
+
+    parsed = urlparse(url)
+    hostname = parsed.hostname or url.replace('https://', '').replace('http://', '').split('/')[0]
+
+    try:
+        # Параллельное сканирование всех портов
+        tasks = [_scan_port_async(hostname, port) for port in COMMON_PORTS.keys()]
+        results = await asyncio.gather(*tasks)
+
+        for port, is_open in zip(COMMON_PORTS.keys(), results):
+            if is_open:
+                service = COMMON_PORTS[port]
+                severity = Severity.HIGH if port in DANGEROUS_PORTS else Severity.INFO
+                findings.append(Finding(
+                    issue=f"Открыт порт {port} ({service})",
+                    severity=severity,
+                    module="Открытые порты",
+                    port=port,
+                    service=service
+                ))
+
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка сканирования портов",
+            severity=Severity.INFO,
+            module="Открытые порты",
+            error=str(e)
+        ))
+
+    status = "FAIL" if any(f.severity == Severity.HIGH for f in findings) else "PASS"
+    return ModuleResult(status=status, findings=findings)

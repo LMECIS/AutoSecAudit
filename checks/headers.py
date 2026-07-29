@@ -1,61 +1,66 @@
 # checks/headers.py
-import requests
-import urllib3
+import httpx
+from models import Finding, ModuleResult, Severity
 
-# Отключаем предупреждения о небезопасных соединениях для целей аудита
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 REQUIRED_HEADERS = {
     'Strict-Transport-Security': {
         'description': 'HSTS (защита от SSL-stripping атак)',
-        'severity': 'HIGH'
+        'severity': Severity.HIGH
     },
     'Content-Security-Policy': {
-        'description': 'CSP (защита от XSS и инъекций)',
-        'severity': 'HIGH'
+        'description': 'CSP (защита от XSS и инъекций)',
+        'severity': Severity.HIGH
     },
     'X-Content-Type-Options': {
         'description': 'Запрет MIME-sniffing',
-        'severity': 'MEDIUM'
+        'severity': Severity.MEDIUM
     },
     'X-Frame-Options': {
         'description': 'Защита от Clickjacking',
-        'severity': 'MEDIUM'
+        'severity': Severity.MEDIUM
     },
     'Referrer-Policy': {
         'description': 'Контроль утечки Referer',
-        'severity': 'LOW'
+        'severity': Severity.LOW
     }
 }
 
-def check_headers(url: str) -> dict:
+
+async def check_headers(client: httpx.AsyncClient, url: str) -> ModuleResult:
     """Проверяет наличие и качество HTTP заголовков безопасности."""
-    results = {"status": "PASS", "findings": []}
-    
+    findings = []
+
     try:
-        # allow_redirects=True важен, чтобы проверить заголовки после редиректа на HTTPS
-        response = requests.get(url, timeout=10, allow_redirects=True, verify=False)
-        
+        response = await client.get(url, follow_redirects=True)
+
         for header, info in REQUIRED_HEADERS.items():
             if header not in response.headers:
-                results["status"] = "FAIL"
-                results["findings"].append({
-                    "header": header,
-                    "issue": f"Заголовок отсутствует",
-                    "description": info['description'],
-                    "severity": info['severity']
-                })
+                findings.append(Finding(
+                    issue=f"Заголовок отсутствует: {header}",
+                    severity=info['severity'],
+                    module="HTTP Заголовки",
+                    description=info['description'],
+                    header=header
+                ))
             else:
-                # Дополнительная логика для проверки качества заголовка (опционально)
-                if header == 'Strict-Transport-Security' and 'includeSubDomains' not in response.headers[header]:
-                    results["findings"].append({
-                        "header": header,
-                        "issue": "Отсутствует директива includeSubDomains",
-                        "severity": "LOW"
-                    })
-                    
-    except requests.RequestException as e:
-        results["status"] = "ERROR"
-        results["findings"].append({"error": str(e)})
-        
-    return results
+                if header == 'Strict-Transport-Security':
+                    value = response.headers[header]
+                    if 'includeSubDomains' not in value:
+                        findings.append(Finding(
+                            issue="HSTS: отсутствует директива includeSubDomains",
+                            severity=Severity.LOW,
+                            module="HTTP Заголовки",
+                            header=header
+                        ))
+
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка проверки заголовков",
+            severity=Severity.INFO,
+            module="HTTP Заголовки",
+            error=str(e)
+        ))
+
+    status = "FAIL" if findings else "PASS"
+    return ModuleResult(status=status, findings=findings)

@@ -1,106 +1,87 @@
 # checks/http_methods.py
-import requests
-import urllib3
+import httpx
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-# HTTP методы и их оценка риска
 HTTP_METHODS = {
-    "OPTIONS": {"risk": "INFO", "description": "Информационный метод"},
-    "GET": {"risk": "INFO", "description": "Стандартный метод чтения"},
-    "HEAD": {"risk": "INFO", "description": "Получение только заголовков"},
-    "POST": {"risk": "INFO", "description": "Стандартный метод отправки"},
-    "PUT": {"risk": "HIGH", "description": "Загрузка/замена файлов — риск несанкционированной записи"},
-    "DELETE": {"risk": "HIGH", "description": "Удаление ресурсов — риск потери данных"},
-    "PATCH": {"risk": "MEDIUM", "description": "Частичное изменение ресурсов"},
-    "TRACE": {"risk": "HIGH", "description": "Уязвим к XST-атакам (Cross-Site Tracing)"},
-    "CONNECT": {"risk": "MEDIUM", "description": "Используется для прокси-туннелей"},
+    "OPTIONS": {"risk": Severity.INFO, "description": "Информационный метод"},
+    "GET": {"risk": Severity.INFO, "description": "Стандартный метод чтения"},
+    "HEAD": {"risk": Severity.INFO, "description": "Получение заголовков"},
+    "POST": {"risk": Severity.INFO, "description": "Стандартный метод отправки"},
+    "PUT": {"risk": Severity.HIGH, "description": "Загрузка/замена файлов"},
+    "DELETE": {"risk": Severity.HIGH, "description": "Удаление ресурсов"},
+    "PATCH": {"risk": Severity.MEDIUM, "description": "Частичное изменение"},
+    "TRACE": {"risk": Severity.HIGH, "description": "Уязвим к XST-атакам"},
+    "CONNECT": {"risk": Severity.MEDIUM, "description": "Прокси-туннели"},
 }
 
-def check_http_methods(url: str) -> dict:
+
+async def check_http_methods(client: httpx.AsyncClient, url: str) -> ModuleResult:
     """Проверяет доступные HTTP методы."""
-    results = {"status": "PASS", "findings": []}
+    findings = []
 
     try:
-        # Сначала пробуем OPTIONS
-        response = requests.options(
-            url,
-            timeout=10,
-            verify=False,
-            allow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
-        )
-
-        # Парсим Allow заголовок
+        response = await client.request("OPTIONS", url, follow_redirects=True)
         allow_header = response.headers.get("Allow", "")
+
         if allow_header:
             methods = [m.strip().upper() for m in allow_header.split(",")]
         else:
-            # Если Allow нет — пробуем каждый метод вручную
             methods = []
-            for method in HTTP_METHODS.keys():
-                try:
-                    r = requests.request(
-                        method, url,
-                        timeout=5,
-                        verify=False,
-                        allow_redirects=False
-                    )
-                    # 405 = метод не разрешён, всё остальное — возможно разрешён
-                    if r.status_code != 405:
-                        methods.append(method)
-                except requests.RequestException:
-                    continue
 
-        # Анализируем найденные методы
         for method in methods:
             if method in HTTP_METHODS:
                 info = HTTP_METHODS[method]
-                if info["risk"] in ["HIGH", "MEDIUM"]:
-                    results["status"] = "FAIL"
-                    results["findings"].append({
-                        "method": method,
-                        "issue": f"Доступен опасный HTTP метод: {method}",
-                        "description": info["description"],
-                        "severity": info["risk"],
-                        "solution": f"Отключить метод {method} в конфигурации сервера"
-                    })
+                if info["risk"] in [Severity.HIGH, Severity.MEDIUM]:
+                    findings.append(Finding(
+                        issue=f"Доступен опасный HTTP метод: {method}",
+                        severity=info["risk"],
+                        module="HTTP методы",
+                        method=method,
+                        description=info["description"],
+                        solution=f"Отключить метод {method} в конфигурации сервера"
+                    ))
                 else:
-                    results["findings"].append({
-                        "method": method,
-                        "issue": f"Доступен метод: {method}",
-                        "description": info["description"],
-                        "severity": "INFO"
-                    })
+                    findings.append(Finding(
+                        issue=f"Доступен метод: {method}",
+                        severity=Severity.INFO,
+                        module="HTTP методы",
+                        method=method
+                    ))
 
-        # Специальная проверка TRACE
+        # Проверка TRACE
         try:
-            trace_resp = requests.request(
+            trace_resp = await client.request(
                 "TRACE", url,
-                timeout=5,
-                verify=False,
                 headers={"User-Agent": "AutoSecAudit-TRACE-TEST"}
             )
             if trace_resp.status_code == 200 and "AutoSecAudit-TRACE-TEST" in trace_resp.text:
-                results["status"] = "FAIL"
-                results["findings"].append({
-                    "method": "TRACE",
-                    "issue": "TRACE метод активен и возвращает заголовки",
-                    "description": "Сервер уязвим к XST-атакам (кража cookie через XSS+TRACE)",
-                    "severity": "HIGH",
-                    "solution": "Отключить TRACE: TraceEnable Off (Apache)"
-                })
-        except requests.RequestException:
+                findings.append(Finding(
+                    issue="TRACE метод активен и возвращает заголовки (XST)",
+                    severity=Severity.HIGH,
+                    module="HTTP методы",
+                    method="TRACE",
+                    solution="Отключить TRACE: TraceEnable Off (Apache)"
+                ))
+        except Exception:
             pass
 
-        if not results["findings"]:
-            results["findings"].append({
-                "info": "HTTP методы не определены",
-                "severity": "INFO"
-            })
+        if not findings:
+            findings.append(Finding(
+                info="HTTP методы не определены",
+                issue="Методы не раскрыты",
+                severity=Severity.INFO,
+                module="HTTP методы"
+            ))
 
-    except requests.RequestException as e:
-        results["status"] = "ERROR"
-        results["findings"].append({"error": str(e)})
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка проверки HTTP методов",
+            severity=Severity.INFO,
+            module="HTTP методы",
+            error=str(e)
+        ))
 
-    return results
+    status = "FAIL" if any(f.severity in (Severity.HIGH, Severity.CRITICAL)
+                           for f in findings) else "PASS"
+    return ModuleResult(status=status, findings=findings)

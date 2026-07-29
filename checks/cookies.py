@@ -1,46 +1,68 @@
-import requests
-import urllib3
+# checks/cookies.py
+import httpx
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-def check_cookies(url: str) -> dict:
-    """Проверяет атрибуты безопасности Cookie."""
-    results = {"status": "PASS", "findings": []}
-    
+async def check_cookies(client: httpx.AsyncClient, url: str) -> ModuleResult:
+    """Проверяет атрибуты безопасности Cookie через заголовки Set-Cookie."""
+    findings = []
+
     try:
-        response = requests.get(url, timeout=10, verify=False, allow_redirects=True)
-        cookies = response.cookies
+        response = await client.get(url, follow_redirects=True)
         
-        if not cookies:
-            results["findings"].append({
-                "info": "Cookie не обнаружены",
-                "severity": "INFO"
-            })
-            return results
+        # httpx позволяет получить список всех заголовков Set-Cookie
+        set_cookie_headers = response.headers.get_list("set-cookie")
+        
+        if not set_cookie_headers:
+            findings.append(Finding(
+                issue="Cookie не используются",
+                severity=Severity.INFO,
+                module="Cookie",
+                info="Заголовки Set-Cookie отсутствуют"
+            ))
+            return ModuleResult(status="PASS", findings=findings)
+
+        for header_value in set_cookie_headers:
+            header_lower = header_value.lower()
             
-        for cookie in cookies:
+            # Извлекаем имя cookie (всё до первого знака '=')
+            cookie_name = header_value.split('=')[0].strip()
+            
             issues = []
             
-            if not cookie.secure and url.startswith('https://'):
+            # 1. Проверка флага Secure (обязателен для HTTPS)
+            if url.startswith('https://') and 'secure' not in header_lower:
                 issues.append("отсутствует флаг Secure")
-            
-            if not cookie.has_nonstandard_attr('HttpOnly') and not cookie.has_nonstandard_attr('httponly'):
-                pass
-            
-            samesite = cookie.has_nonstandard_attr('SameSite') or cookie.has_nonstandard_attr('samesite')
-            if not samesite:
-                issues.append("отсутствует SameSite (риск CSRF)")
-            
-            if issues:
-                results["status"] = "FAIL"
-                results["findings"].append({
-                    "cookie": cookie.name,
-                    "issues": ", ".join(issues),
-                    "severity": "MEDIUM"
-                })
                 
-    except requests.RequestException as e:
-        results["status"] = "ERROR"
-        results["findings"].append({"error": str(e)})
-        
-    return results
+            # 2. Проверка флага HttpOnly (защита от XSS-кражи cookie)
+            if 'httponly' not in header_lower:
+                issues.append("отсутствует флаг HttpOnly")
+                
+            # 3. Проверка флага SameSite (защита от CSRF)
+            if 'samesite' not in header_lower:
+                issues.append("отсутствует флаг SameSite")
+                
+            # Если найдены проблемы, добавляем их в отчёт
+            if issues:
+                findings.append(Finding(
+                    issue=f"Небезопасная конфигурация Cookie: '{cookie_name}'",
+                    severity=Severity.MEDIUM,
+                    module="Cookie",
+                    cookie=cookie_name,
+                    description=f"Обнаруженные проблемы: {', '.join(issues)}",
+                    solution="Настройте сервер на отправку cookie с флагами Secure, HttpOnly и SameSite=Strict (или Lax)."
+                ))
+
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка при проверке Cookie",
+            severity=Severity.INFO,
+            module="Cookie",
+            error=str(e)
+        ))
+
+    # Если есть хотя бы одна MEDIUM находка, статус модуля = FAIL
+    has_issues = any(f.severity == Severity.MEDIUM for f in findings)
+    status = "FAIL" if has_issues else "PASS"
+    
+    return ModuleResult(status=status, findings=findings)

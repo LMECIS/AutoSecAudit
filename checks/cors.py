@@ -1,89 +1,61 @@
-import requests
-import urllib3
+# checks/cors.py
+import httpx
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-def check_cors(url: str) -> dict:
+async def check_cors(client: httpx.AsyncClient, url: str) -> ModuleResult:
     """Проверяет конфигурацию CORS на уязвимости."""
-    results = {"status": "PASS", "findings": []}
+    findings = []
 
     test_origins = [
         ("https://evil.com", "Произвольный домен"),
         ("https://example.evil.com", "Поддомен злоумышленника"),
-        ("null", "Null origin (sandbox/iframes)"),
+        ("null", "Null origin"),
     ]
 
     try:
         for origin, description in test_origins:
-            headers = {
-                "Origin": origin,
-                "User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"
-            }
-            response = requests.get(
-                url,
-                timeout=10,
-                verify=False,
-                allow_redirects=True,
-                headers=headers
-            )
+            headers = {"Origin": origin}
+            response = await client.get(url, follow_redirects=True, headers=headers)
 
             acao = response.headers.get("Access-Control-Allow-Origin", "")
             acac = response.headers.get("Access-Control-Allow-Credentials", "")
 
             if acao == "*" and acac.lower() == "true":
-                results["status"] = "FAIL"
-                results["findings"].append({
-                    "issue": "CORS: Wildcard (*) с credentials=true",
-                    "description": "Сервер разрешает запросы с любого домена вместе с cookies",
-                    "severity": "HIGH",
-                    "origin": origin,
-                    "solution": "Убрать credentials или явно указать разрешённые домены"
-                })
+                findings.append(Finding(
+                    issue="CORS: Wildcard (*) с credentials=true",
+                    severity=Severity.HIGH,
+                    module="CORS",
+                    description="Сервер разрешает запросы с любого домена с cookies",
+                    origin=origin,
+                    solution="Убрать credentials или явно указать домены"
+                ))
 
             if acao == origin and origin != "null":
-                results["status"] = "FAIL"
-                results["findings"].append({
-                    "issue": f"CORS: Сервер отражает Origin ({description})",
-                    "description": f"Сервер разрешает запросы от {origin}",
-                    "severity": "HIGH",
-                    "origin": origin,
-                    "solution": "Использовать whitelist разрешённых доменов"
-                })
+                findings.append(Finding(
+                    issue=f"CORS: Сервер отражает Origin ({description})",
+                    severity=Severity.HIGH,
+                    module="CORS",
+                    origin=origin,
+                    solution="Использовать whitelist разрешённых доменов"
+                ))
 
             if acao == "null" and acac.lower() == "true":
-                results["status"] = "FAIL"
-                results["findings"].append({
-                    "issue": "CORS: Разрешён null origin с credentials",
-                    "description": "Уязвимо к атакам через sandboxed iframes",
-                    "severity": "MEDIUM",
-                    "origin": origin,
-                    "solution": "Запретить null origin или убрать credentials"
-                })
+                findings.append(Finding(
+                    issue="CORS: Разрешён null origin с credentials",
+                    severity=Severity.MEDIUM,
+                    module="CORS",
+                    origin=origin,
+                    solution="Запретить null origin"
+                ))
 
-        try:
-            options_resp = requests.options(
-                url,
-                timeout=10,
-                verify=False,
-                headers={
-                    "Origin": "https://evil.com",
-                    "Access-Control-Request-Method": "POST",
-                    "Access-Control-Request-Headers": "Content-Type"
-                }
-            )
-            methods = options_resp.headers.get("Access-Control-Allow-Methods", "")
-            if "DELETE" in methods or "PUT" in methods or "PATCH" in methods:
-                results["findings"].append({
-                    "issue": f"CORS: Разрешены опасные методы ({methods})",
-                    "description": "Атакующий может выполнять модифицирующие запросы",
-                    "severity": "MEDIUM",
-                    "solution": "Ограничить методы до необходимых (GET, POST)"
-                })
-        except requests.RequestException:
-            pass
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка проверки CORS",
+            severity=Severity.INFO,
+            module="CORS",
+            error=str(e)
+        ))
 
-    except requests.RequestException as e:
-        results["status"] = "ERROR"
-        results["findings"].append({"error": str(e)})
-
-    return results
+    status = "FAIL" if findings else "PASS"
+    return ModuleResult(status=status, findings=findings)

@@ -1,25 +1,22 @@
 # checks/tech_stack.py
-import requests
-import urllib3
 import re
-from bs4 import BeautifulSoup
+import httpx
+from models import Finding, ModuleResult, Severity
 
-urllib3.disable_warnings()
 
-# Сигнатуры технологий
 TECH_SIGNATURES = {
     "headers": {
         "X-Powered-By": {
-            "PHP": {"name": "PHP", "version_regex": r"PHP/([\d.]+)", "severity": "INFO"},
-            "ASP.NET": {"name": "ASP.NET", "version_regex": r"ASP\.NET", "severity": "INFO"},
-            "Express": {"name": "Express.js", "version_regex": None, "severity": "INFO"},
+            "PHP": {"name": "PHP", "version_regex": r"PHP/([\d.]+)"},
+            "ASP.NET": {"name": "ASP.NET", "version_regex": r"ASP\.NET(?:\s+([\d.]+))?"},
+            "Express": {"name": "Express.js", "version_regex": None},
         },
         "Server": {
-            "nginx": {"name": "Nginx", "version_regex": r"nginx/([\d.]+)", "severity": "INFO"},
-            "Apache": {"name": "Apache", "version_regex": r"Apache/([\d.]+)", "severity": "INFO"},
-            "Microsoft-IIS": {"name": "IIS", "version_regex": r"IIS/([\d.]+)", "severity": "INFO"},
-            "cloudflare": {"name": "Cloudflare", "version_regex": None, "severity": "INFO"},
-            "LiteSpeed": {"name": "LiteSpeed", "version_regex": None, "severity": "INFO"},
+            "nginx": {"name": "Nginx", "version_regex": r"nginx/([\d.]+)"},
+            "Apache": {"name": "Apache", "version_regex": r"Apache/([\d.]+)"},
+            "Microsoft-IIS": {"name": "IIS", "version_regex": r"IIS/([\d.]+)"},
+            "cloudflare": {"name": "Cloudflare", "version_regex": None},
+            "LiteSpeed": {"name": "LiteSpeed", "version_regex": None},
         },
     },
     "cookies": {
@@ -29,33 +26,17 @@ TECH_SIGNATURES = {
         "csrftoken": "Django",
         "wp-settings": "WordPress",
         "laravel_session": "Laravel",
-        "sessionid": "Python (Django/Flask)",
-    },
-    "meta_generators": {
-        "WordPress": "WordPress",
-        "Joomla": "Joomla",
-        "Drupal": "Drupal",
-        "Magento": "Magento",
-        "Shopify": "Shopify",
-        "Wix": "Wix",
-        "MODX": "MODX",
-        "Bitrix": "1С-Битрикс",
     }
 }
 
-def check_tech_stack(url: str) -> dict:
-    """Определяет технологии, используемые сайтом."""
-    results = {"status": "PASS", "findings": []}
+
+async def check_tech_stack(client: httpx.AsyncClient, url: str) -> ModuleResult:
+    """Определяет технологии, используемые сайтом, и флагует раскрытие версий."""
+    findings = []
     detected = set()
 
     try:
-        response = requests.get(
-            url,
-            timeout=10,
-            verify=False,
-            allow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/2.0)"}
-        )
+        response = await client.get(url, follow_redirects=True)
 
         # 1. Анализ заголовков
         for header_name, signatures in TECH_SIGNATURES["headers"].items():
@@ -65,23 +46,33 @@ def check_tech_stack(url: str) -> dict:
                     if key.lower() in header_value.lower():
                         version = None
                         if info.get("version_regex"):
-                            match = re.search(info["version_regex"], header_value)
+                            match = re.search(info["version_regex"], header_value, re.IGNORECASE)
                             if match:
                                 version = match.group(1)
 
                         tech_id = f"{info['name']}_{version or 'any'}"
                         if tech_id not in detected:
                             detected.add(tech_id)
-                            desc = info["name"]
+                            desc = info["name"] + (f" v{version}" if version else "")
+                            
+                            # 🔴 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Если есть версия - это MEDIUM (FAIL)
                             if version:
-                                desc += f" v{version}"
-                            results["findings"].append({
-                                "technology": desc,
-                                "source": f"Заголовок {header_name}",
-                                "issue": f"Обнаружена технология: {desc}",
-                                "severity": info["severity"],
-                                "info": f"Раскрытие версии может помочь атакующему"
-                            })
+                                findings.append(Finding(
+                                    issue=f"Раскрытие версии ПО: {desc}",
+                                    severity=Severity.MEDIUM,
+                                    module="Технологии",
+                                    technology=desc,
+                                    description=f"Сервер раскрывает точную версию через заголовок {header_name}",
+                                    solution="Скройте версию в конфигурации: server_tokens off; (Nginx) или expose_php = Off (PHP)"
+                                ))
+                            else:
+                                findings.append(Finding(
+                                    issue=f"Обнаружена технология: {desc}",
+                                    severity=Severity.INFO,
+                                    module="Технологии",
+                                    technology=desc,
+                                    description=f"Источник: заголовок {header_name}"
+                                ))
 
         # 2. Анализ cookies
         for cookie in response.cookies:
@@ -89,53 +80,48 @@ def check_tech_stack(url: str) -> dict:
                 if pattern.lower() in cookie.name.lower():
                     if tech_name not in detected:
                         detected.add(tech_name)
-                        results["findings"].append({
-                            "technology": tech_name,
-                            "source": f"Cookie: {cookie.name}",
-                            "issue": f"Обнаружена технология: {tech_name}",
-                            "severity": "INFO"
-                        })
+                        findings.append(Finding(
+                            issue=f"Обнаружена технология: {tech_name}",
+                            severity=Severity.INFO,
+                            module="Технологии",
+                            technology=tech_name,
+                            description=f"Источник: cookie {cookie.name}"
+                        ))
 
         # 3. Анализ HTML (meta generator)
-        try:
-            soup = BeautifulSoup(response.text, "html.parser")
-            generator = soup.find("meta", attrs={"name": "generator"})
-            if generator and generator.get("content"):
-                content = generator["content"]
-                for pattern, tech_name in TECH_SIGNATURES["meta_generators"].items():
-                    if pattern.lower() in content.lower():
-                        if tech_name not in detected:
-                            detected.add(tech_name)
-                            results["findings"].append({
-                                "technology": tech_name,
-                                "source": f"Meta generator: {content}",
-                                "issue": f"Обнаружена CMS: {tech_name}",
-                                "severity": "INFO"
-                            })
+        if "<meta" in response.text.lower():
+            match = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\']+)',
+                              response.text, re.IGNORECASE)
+            if match:
+                generator = match.group(1)
+                # Для CMS раскрытие названия обычно INFO, но если там есть версия - можно повысить
+                findings.append(Finding(
+                    issue=f"Обнаружена CMS: {generator}",
+                    severity=Severity.INFO,
+                    module="Технологии",
+                    technology=generator,
+                    description="Источник: meta generator"
+                ))
 
-            # Поиск по ссылкам и скриптам
-            for link in soup.find_all("link", href=True):
-                if "wp-content" in link["href"]:
-                    if "WordPress" not in detected:
-                        detected.add("WordPress")
-                        results["findings"].append({
-                            "technology": "WordPress",
-                            "source": "Путь wp-content",
-                            "issue": "Обнаружена CMS: WordPress",
-                            "severity": "INFO"
-                        })
-        except Exception:
-            pass
+        # Если вообще ничего не нашли - это хорошо (сервер скрытен)
+        if not findings:
+            findings.append(Finding(
+                info="Технологии не определены",
+                issue="Сервер не раскрывает информацию о стеке (хорошо)",
+                severity=Severity.INFO,
+                module="Технологии"
+            ))
 
-        # Если ничего не нашли — это тоже информация
-        if not results["findings"]:
-            results["findings"].append({
-                "info": "Технологии не определены (хорошо — сервер не раскрывает информацию)",
-                "severity": "INFO"
-            })
+    except Exception as e:
+        findings.append(Finding(
+            issue="Ошибка определения технологий",
+            severity=Severity.INFO,
+            module="Технологии",
+            error=str(e)
+        ))
 
-    except requests.RequestException as e:
-        results["status"] = "ERROR"
-        results["findings"].append({"error": str(e)})
-
-    return results
+    # 🔴 ДИНАМИЧЕСКИЙ СТАТУС: Если есть хотя бы одна находка MEDIUM или выше → FAIL
+    has_issues = any(f.severity in (Severity.HIGH, Severity.CRITICAL, Severity.MEDIUM) for f in findings)
+    status = "FAIL" if has_issues else "PASS"
+    
+    return ModuleResult(status=status, findings=findings)

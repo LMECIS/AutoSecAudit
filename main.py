@@ -1,124 +1,108 @@
 # main.py
 import argparse
+import asyncio
 import json
 import webbrowser
 import os
+import sys
 from datetime import datetime
 from urllib.parse import urlparse
+import httpx
 
-from checks.headers import check_headers
-from checks.ssl_tls import check_ssl
-from checks.dns_records import check_email_security
-from checks.cookies import check_cookies
-from checks.exposed_files import check_exposed_files
-from checks.ports import check_ports
-from checks.directory_listing import check_directory_listing
-from checks.tech_stack import check_tech_stack
-from checks.cors import check_cors
-from checks.http_methods import check_http_methods
-from checks.subdomains import check_subdomains
-from checks.robots_sitemap import check_robots_sitemap
-from checks.default_creds import check_default_credentials
+from models import AuditReport, Finding, Severity, ModuleResult
+from plugin_loader import discover_plugins
+from diff_engine import load_baseline, compare_reports, print_diff, should_fail_ci
 from reports.html_report import generate_html_report
 
 
-def run_audit(target_url: str, enable_subdomains: bool = False, 
-              enable_brute: bool = False, auto_open: bool = True):
+async def run_single_module(client: httpx.AsyncClient, name: str, func, url: str):
+    """Запускает один модуль с обработкой ошибок."""
+    try:
+        result = await func(client, url)
+        # Обновляем имя модуля во всех findings
+        for f in result.findings:
+            if hasattr(f, "module") and not f.module:
+                f.module = name
+        return name, result
+    except Exception as e:
+        error_finding = Finding(
+            issue=f"Ошибка выполнения модуля",
+            severity=Severity.INFO,
+            module=name,
+            error=str(e)
+        )
+        return name, ModuleResult(status="ERROR", findings=[error_finding])
+
+
+async def run_audit(target_url: str, enable_subdomains: bool = False,
+                    enable_brute: bool = False) -> AuditReport:
+    """Запускает все модули параллельно."""
     print(f"\n{'='*60}")
-    print(f"[*] AutoSecAudit v3.0")
+    print(f"[*] AutoSecAudit v4.0 (async)")
     print(f"[*] Цель: {target_url}")
     print(f"[*] Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     if enable_brute:
         print(f"[!] ⚠️  ВКЛЮЧЕНА ПРОВЕРКА ДЕФОЛТНЫХ УЧЁТОК (--brute)")
     print(f"{'='*60}\n")
 
-    report = {
-        "target": target_url,
-        "scan_date": datetime.now().isoformat(),
-        "options": {
+    # Загружаем плагины
+    all_plugins = discover_plugins()
+
+    # Фильтруем опциональные модули
+    plugins_to_run = {}
+    for name, func in all_plugins.items():
+        if "Subdomain" in name and not enable_subdomains:
+            continue
+        if "Default" in name and "Cred" in name and not enable_brute:
+            continue
+        plugins_to_run[name] = func
+
+    print(f"[*] Загружено плагинов: {len(plugins_to_run)}")
+    print(f"[*] Запуск параллельного сканирования...\n")
+
+    async with httpx.AsyncClient(
+        verify=False,
+        timeout=15.0,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        headers={"User-Agent": "Mozilla/5.0 (compatible; AutoSecAudit/4.0)"}
+    ) as client:
+        tasks = [
+            run_single_module(client, name, func, target_url)
+            for name, func in plugins_to_run.items()
+        ]
+        results = await asyncio.gather(*tasks)
+
+    report = AuditReport(
+        target=target_url,
+        scan_date=datetime.now().isoformat(),
+        options={
             "subdomains": enable_subdomains,
             "brute_force": enable_brute
-        },
-        "modules": {}
-    }
-
-    domain = (
-        urlparse(target_url).hostname
-        or target_url.replace('https://', '').replace('http://', '').split('/')[0]
+        }
     )
 
-    # Базовые модули (всегда включены)
-    modules = [
-        ("🔒 HTTP Заголовки", check_headers, target_url),
-        ("🔐 SSL/TLS", check_ssl, target_url),
-        ("📧 DNS (Email)", check_email_security, domain),
-        ("🍪 Cookie", check_cookies, target_url),
-        ("📂 Утечки файлов", check_exposed_files, target_url),
-        ("🚪 Открытые порты", check_ports, target_url),
-        ("📁 Открытые директории", check_directory_listing, target_url),
-        ("🛠️ Технологии", check_tech_stack, target_url),
-        ("🌐 CORS", check_cors, target_url),
-        ("⚙️ HTTP методы", check_http_methods, target_url),
-        ("📜 Robots/Sitemap", check_robots_sitemap, target_url),
-    ]
+    for name, result in results:
+        report.modules[name] = result
+        status_icon = {"PASS": "✅", "FAIL": "❌", "ERROR": "⚠️"}.get(result.status, "❓")
+        print(f"    {status_icon} {name}: {len(result.findings)} находок")
 
-    # Опциональные модули
-    if enable_subdomains:
-        modules.append(("🌍 Поддомены", check_subdomains, target_url))
+    return report
 
-    if enable_brute:
-        modules.append(("🔑 Дефолтные учётки ⚠️", check_default_credentials, target_url))
 
-    for i, (name, func, arg) in enumerate(modules, 1):
-        print(f"[{i:2d}/{len(modules)}] {name}...")
-        try:
-            result = func(arg)
-            # Защита от None
-            if result is None:
-                result = {
-                    "status": "ERROR",
-                    "findings": [{"error": "Модуль вернул None"}]
-                }
-            report["modules"][name] = result
-        except Exception as e:
-            print(f"        [!] Ошибка: {e}")
-            report["modules"][name] = {
-                "status": "ERROR",
-                "findings": [{"error": str(e)}]
-            }
-
-    # --- Консольный вывод ---
+def print_summary(report: AuditReport):
+    """Выводит сводку в консоль."""
     print(f"\n{'='*60}")
     print("[*] РЕЗУЛЬТАТЫ АУДИТА")
     print(f"{'='*60}")
 
-    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    severity_counts = {s: 0 for s in Severity}
 
-    for module_name, module_result in report["modules"].items():
-        # Дополнительная защита
-        if module_result is None:
+    for module_name, module_result in report.modules.items():
+        if module_result.findings:
             print(f"\n[!] {module_name}:")
-            print(f"    [ERROR] Модуль вернул None")
-            continue
-        
-        findings = module_result.get("findings", [])
-        if findings:
-            print(f"\n[!] {module_name}:")
-            for finding in findings:
-                severity = finding.get("severity", finding.get("risk", "INFO")).upper()
-                severity_counts[severity] = severity_counts.get(severity, 0) + 1
-                issue = (
-                    finding.get("issue") or
-                    finding.get("description") or
-                    finding.get("name") or
-                    finding.get("file") or
-                    finding.get("cookie") or
-                    finding.get("technology") or
-                    finding.get("subdomain") or
-                    finding.get("info") or
-                    str(finding)
-                )
-                print(f"    [{severity}] {issue}")
+            for finding in module_result.findings:
+                severity_counts[finding.severity] += 1
+                print(f"    [{finding.severity.value}] {finding.issue}")
 
     print(f"\n{'='*60}")
     print("[*] СВОДКА:")
@@ -128,98 +112,113 @@ def run_audit(target_url: str, enable_subdomains: bool = False,
     else:
         for sev, count in severity_counts.items():
             if count > 0:
-                print(f"    {sev}: {count}")
+                print(f"    {sev.value}: {count}")
     print(f"{'='*60}\n")
 
-    # --- Сохранение отчётов ---
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    json_filename = f"audit_report_{domain}_{timestamp}.json"
-    with open(json_filename, 'w', encoding='utf-8') as f:
-        json.dump(report, f, indent=4, ensure_ascii=False)
-    print(f"[+] JSON отчёт: {json_filename}")
 
-    html_filename = f"audit_report_{domain}_{timestamp}.html"
-    generate_html_report(report, html_filename)
-    print(f"[+] HTML отчёт: {html_filename}")
-    
-    # --- Автооткрытие HTML в браузере ---
-    if auto_open:
-        try:
-            # Получаем абсолютный путь (webbrowser требует полный путь)
-            html_path = os.path.abspath(html_filename)
-            print(f"[🌐] Открываю отчёт в браузере...")
-            webbrowser.open(f"file://{html_path}")
-        except Exception as e:
-            print(f"[!] Не удалось открыть браузер: {e}")
-            print(f"[!] Откройте файл вручную: {html_filename}")
-    
-    print()
-
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
-        description="AutoSecAudit v3.0 — Комплексный аудит безопасности",
+        description="AutoSecAudit v4.0 — Async аудит безопасности с плагинами",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 ПРИМЕРЫ:
   python main.py https://example.com
-      Базовый пассивный аудит (~1 минута)
-      HTML отчёт откроется автоматически в браузере
+      Базовый async аудит (~40 секунд)
 
-  python main.py https://example.com --no-open
-      Аудит без автооткрытия браузера
-
-  python main.py https://example.com --subdomains
-      + поиск поддоменов через DNS (~2-3 минуты)
-
-  python main.py https://example.com --brute
-      + проверка дефолтных учёток (~5-10 минут)
-      ⚠️  ТОЛЬКО для своих ресурсов!
+  python main.py https://example.com --baseline prev.json
+      Сравнение с предыдущим сканом (CI режим)
 
   python main.py https://example.com --subdomains --brute
       Полный аудит со всеми модулями
         """
     )
     parser.add_argument("url", help="URL целевого сайта")
-    parser.add_argument(
-        "--subdomains",
-        action="store_true",
-        help="Включить поиск поддоменов через DNS-словарь"
-    )
-    parser.add_argument(
-        "--brute",
-        action="store_true",
-        help="⚠️  Включить проверку дефолтных учёток (ТОЛЬКО для своих ресурсов!)"
-    )
-    parser.add_argument(
-        "--no-open",
-        action="store_true",
-        help="Не открывать HTML отчёт в браузере автоматически"
-    )
+    parser.add_argument("--subdomains", action="store_true",
+                        help="Включить поиск поддоменов")
+    parser.add_argument("--brute", action="store_true",
+                        help="⚠️  Проверка дефолтных учёток (ТОЛЬКО для своих!)")
+    parser.add_argument("--baseline",
+                        help="Путь к предыдущему отчёту для сравнения (CI)")
+    parser.add_argument("--no-open", action="store_true",
+                        help="Не открывать HTML отчёт")
     args = parser.parse_args()
 
     if not args.url.startswith('http'):
         args.url = 'https://' + args.url
 
-    # Предупреждение для --brute
     if args.brute:
         print("\n" + "="*60)
-        print("⚠️  ВНИМАНИЕ!")
-        print("="*60)
-        print("Вы включили проверку дефолтных учётных данных.")
-        print("Этот модуль выполняет активные действия и может")
-        print("расцениваться как несанкционированный доступ.")
-        print()
-        print("Используйте ТОЛЬКО на своих ресурсах или при наличии")
-        print("явного письменного разрешения владельца.")
+        print("⚠️  ВНИМАНИЕ: Активная проверка учётных данных!")
+        print("Используйте ТОЛЬКО на своих ресурсах.")
         print("="*60 + "\n")
 
-    # Автооткрытие включено по умолчанию, отключается через --no-open
-    auto_open = not args.no_open
+    # Запускаем async аудит
+    report = asyncio.run(run_audit(
+        args.url,
+        enable_subdomains=args.subdomains,
+        enable_brute=args.brute
+    ))
 
-    run_audit(
-        args.url, 
-        enable_subdomains=args.subdomains, 
-        enable_brute=args.brute,
-        auto_open=auto_open
-    )
+    # Выводим результаты
+    print_summary(report)
+
+    # Diff-режим
+    if args.baseline:
+        try:
+            baseline = load_baseline(args.baseline)
+            diff = compare_reports(baseline, report)
+            print_diff(diff)
+
+            domain = urlparse(args.url).hostname
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            diff_filename = f"diff_report_{domain}_{timestamp}.json"
+            with open(diff_filename, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "new": [f.to_dict() for f in diff["new"]],
+                    "fixed": [f.to_dict() for f in diff["fixed"]],
+                    "unchanged_count": len(diff["unchanged"])
+                }, f, indent=4, ensure_ascii=False)
+            print(f"[+] Diff отчёт: {diff_filename}")
+
+            if should_fail_ci(diff, fail_on_new=True):
+                print(f"\n[!] CI FAIL: Обнаружены новые уязвимости")
+                # Сохраняем отчёты перед выходом
+                _save_reports(report, args.url, args.no_open)
+                sys.exit(1)
+            else:
+                print(f"\n[✅] CI PASS: Новых уязвимостей не обнаружено")
+        except Exception as e:
+            print(f"[!] Ошибка загрузки baseline: {e}")
+            sys.exit(1)
+
+    # Сохраняем отчёты
+    _save_reports(report, args.url, args.no_open)
+
+
+def _save_reports(report: AuditReport, url: str, no_open: bool):
+    """Сохраняет JSON и HTML отчёты."""
+    domain = urlparse(url).hostname
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    json_filename = f"audit_report_{domain}_{timestamp}.json"
+    with open(json_filename, 'w', encoding='utf-8') as f:
+        json.dump(report.to_dict(), f, indent=4, ensure_ascii=False)
+    print(f"[+] JSON отчёт: {json_filename}")
+
+    html_filename = f"audit_report_{domain}_{timestamp}.html"
+    generate_html_report(report.to_dict(), html_filename)
+    print(f"[+] HTML отчёт: {html_filename}")
+
+    if not no_open:
+        try:
+            html_path = os.path.abspath(html_filename)
+            print(f"[🌐] Открываю отчёт в браузере...")
+            webbrowser.open(f"file://{html_path}")
+        except Exception as e:
+            print(f"[!] Не удалось открыть браузер: {e}")
+
+    print()
+
+
+if __name__ == "__main__":
+    main()
